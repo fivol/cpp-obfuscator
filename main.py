@@ -208,9 +208,9 @@ class CodePart:
         raise NotImplementedError
 
     def __repr__(self):
-        rep = self.refactor()
+        rep = self.refactor().replace('    ', ' ')
         n = '\n'
-        return f'{self.__class__.__name__}({rep.split(n)[0][:150]})'
+        return f'{self.__class__.__name__}({rep.replace(n, " ")[:100]})'
 
 
 class CSpaces(CodePart):
@@ -565,13 +565,11 @@ class CConstructionIfElse(CodePart):
 class CExpressionUntilBracket(CodePart):
     @classmethod
     def fit(cls, it):
-        reg_until_bracket = r'[^)]*'
-        s = fit_regex(it, reg_until_bracket)
-
+        s = fit_regex(it, r'[^)]+')
         while s.count('(') != s.count(')'):
             s += ')'
             it.shift(1)
-            s += fit_regex(it, reg_until_bracket)
+            s += fit_regex(it, r'[^)]*')
 
         return cls(s)
 
@@ -583,7 +581,10 @@ class CExpressionInBrackets(CodePart):
     @classmethod
     def fit(cls, it):
         fit(it, specific_symbol('('))
-        exp = fit(it, CExpressionUntilBracket)
+        exp = CEmpty()
+        with try_fit(it) as f:
+            exp = f(CExpressionUntilBracket)
+
         fit(it, specific_symbol(')'))
         return cls(exp)
 
@@ -594,13 +595,17 @@ class CExpressionInBrackets(CodePart):
 class CFullExpression(CodePart):
     @classmethod
     def fit(cls, it):
-        return cls(fit(it, r'.*;'))
+        with try_fit(it) as f:
+            f(specific_symbol('}'))
+        if f.success:
+            raise NotFitException
+        return cls(fit(it, r'[^;]*;'))
 
 
 class CCommand(CodePart):
     @classmethod
     def fit(cls, it):
-        # with try_fit(it) as f: return cls(f(CConstructionIfElse))
+        with try_fit(it) as f: return cls(f(CConstructionIfElse))
         with try_fit(it) as f: return cls(f(CConstructionFor))
         with try_fit(it) as f: return cls(f(CFullExpression))
         raise NotFitException
@@ -663,14 +668,11 @@ class CConstructionFor(CodePart):
         fit(it, specific_word('for'))
         fit(it, specific_symbol('('))
         e1 = fit(it, CFullExpression)
-        print(e1)
         e2 = fit(it, CFullExpression)
         e3 = CEmpty()
-        print(it.string[:100])
         with try_fit(it) as f:
-            print(it.string[:100])
             e3 = f(CExpressionUntilBracket)
-            # print(e3)
+
         fit(it, specific_symbol(')'))
         body = fit(it, CBodyOrInstruction)
         return cls(e1, e2, e3, body)
@@ -679,12 +681,28 @@ class CConstructionFor(CodePart):
         return f'for ({self.e1.refactor()} {self.e2.refactor()} {self.e3.refactor()}) {self.body.refactor(**kwargs)}'
 
 
+class CFunc(CodePart):
+    @classmethod
+    def fit(cls, it):
+        with try_fit(it) as f: return f(CFuncDeclaration)
+        return f(CFuncImplementation)
+
+
+# class CClass(CodePart):
+#     @classmethod
+#     def fit(cls, it):
+#         fit(it, specific_word('class'))
+#         fit(it, specific_symbol('{'))
+#         fit(it, [CFunc])
+#         fit(it, specific_symbol('}'))
+
+
 c_elements = [
     CSpaces,
     CInclude,
     CFuncDeclaration,
     CFuncImplementation,
-    # CCommand,
+    CCommand,
     CWord,
     CSymbol
 ]
