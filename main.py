@@ -1,8 +1,10 @@
-from random import randint
 import re
+from functools import reduce
+from random import randint, shuffle
 from contextlib import suppress, contextmanager
 from pprint import pprint
 from collections.abc import Iterable
+
 
 file_name = 'code.cpp'
 
@@ -16,6 +18,11 @@ def rand_chance(how_many, from_amount):
 
 def throw_coin():
     return rand_chance(1, 2)
+
+
+key_words = [
+    'class', 'for', 'if', 'else', 'public', 'private', 'while', 'do', 'struct'
+]
 
 
 class RefSetting:
@@ -51,30 +58,34 @@ class NotFitException(Exception):
     pass
 
 
-def merge(*items):
+def merge(*items, **kwargs):
     res = []
+    prefix = ''
     for item in items:
         if isinstance(item, str):
-            res.append(item)
+            res.append(prefix + item)
         elif isinstance(item, CodePart):
-            res.append(item.refactor())
+            res.append(item.refactor(**kwargs))
         elif isinstance(item, Iterable):
-            res.append(merge(*item))
+            res.append(merge(*item, **kwargs))
         else:
             raise TypeError(item)
 
     return ''.join(res)
 
 
-def refactor_list(items, prefix='', **kwargs):
+def refactor_list(items, prefix='', join=None, **kwargs):
     def adjust_value(value):
-        return prefix + value
+        return merge(value, **kwargs)
 
-    return list(
+    res = list(
         map(
             lambda x: adjust_value(x.refactor(**kwargs)) if isinstance(x, CodePart) else adjust_value(x), items
         )
     )
+    if join:
+        res = join.join(res)
+    return res
 
 
 def add_word(need_add, word, prefix=False, postfix=False):
@@ -82,6 +93,10 @@ def add_word(need_add, word, prefix=False, postfix=False):
         return ''
 
     return word
+
+
+def str_indent(indent):
+    return ' ' * indent
 
 
 def suppress_spaces(it):
@@ -106,7 +121,7 @@ def fit(it, template, block_it=False, allow_spaces=True, sep=None, pass_spaces=T
         suppress_spaces(it)
 
     if type(template) is type and issubclass(template, CodePart):
-        return template.fit(it)
+        return template(it)
 
     elif isinstance(template, str):
         return fit_regex(it, template)
@@ -141,6 +156,14 @@ def have_item(it, item):
     return f.success
 
 
+def fit_choice(it, *templates):
+    for temp in templates:
+        with try_fit(it) as f:
+            return f(temp)
+
+    raise NotFitException
+
+
 @contextmanager
 def try_fit(it):
     it_copy = it.copy()
@@ -149,11 +172,13 @@ def try_fit(it):
         return fit(it_copy, *args, **kwargs)
 
     safe_fit.success = True
+    safe_fit.fail = False
 
     try:
         yield safe_fit
     except NotFitException:
         safe_fit.success = False
+        safe_fit.fail = True
         pass
     else:
         it.fill_from(it_copy)
@@ -161,187 +186,145 @@ def try_fit(it):
 
 def specific_symbol(symbol):
     class SpecificSymbol(CSymbol):
-        @classmethod
-        def fit(cls, it):
-            parse_res = CSymbol.fit(it)
-            if parse_res and parse_res.symbol != symbol:
+        def __init__(self, it):
+            super().__init__(it)
+            if self.value != symbol:
                 raise NotFitException
-            return parse_res
 
     return SpecificSymbol
 
 
 def specific_word(word):
     class SpecificWord(CWord):
-        @classmethod
-        def fit(cls, it):
-            parse_res = CWord.fit(it)
-            if parse_res and parse_res.word != word:
+        def __init__(self, it):
+            super().__init__(it)
+            if self.value != word:
                 raise NotFitException
-            return parse_res
 
     return SpecificWord
 
 
+# @logger.logit
 class CodePart:
-
-    def __init__(self, *items):
-        self.items = items
-
     @classmethod
     def parse(cls, it):
         try:
             it_copy = it.copy()
-            res = cls.fit(it_copy)
-            if res is None:
-                raise NotFitException
+            res = cls(it_copy)
             it.fill_from(it_copy)
             return res
         except NotFitException:
             return None
 
     def refactor(self, **kwargs):
-        return merge(self.items)
-
-    @classmethod
-    def fit(cls, it):
-        raise NotImplementedError
+        return merge(self.value, **kwargs)
 
     def __repr__(self):
         rep = self.refactor().replace('    ', ' ')
         n = '\n'
         return f'{self.__class__.__name__}({rep.replace(n, " ")[:100]})'
 
+    def __str__(self):
+        return self.refactor()
+
 
 class CSpaces(CodePart):
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, r'\s+'))
+    def __init__(self, it):
+        self.value = fit_regex(it, r'\s+')
 
 
 class CSymbol(CodePart):
-    def __init__(self, symbol):
-        self.symbol = symbol
-        super().__init__(symbol)
-
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, '.|\n'))
+    def __init__(self, it):
+        self.value = fit(it, r'.|\n')
 
 
 class CSemicolon(CodePart):
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, ';'))
+
+    def __init__(self, it):
+        self.value = fit_regex(it, ';')
 
 
 class CComma(CodePart):
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, ','))
+
+    def __init__(self, it):
+        self.value = fit_regex(it, ',')
 
 
 class CWord(CodePart):
-    def __init__(self, items):
-        self.word = items
-        super().__init__(items)
-
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, r'[a-zA-Z_]\w*'))
+    def __init__(self, it):
+        self.value = fit_regex(it, r'[a-zA-Z_]\w*')
 
 
 class CInclude(CodePart):
-    def __init__(self, name, value, det1, det2):
-        self.name = name
-        self.value = value
-        self.det1 = det1
-        self.det2 = det2
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_symbol('#'))
-        name = fit(it, specific_word('include'), allow_spaces=False)
+        self.name = fit(it, specific_word('include'), allow_spaces=False)
         suppress_spaces(it)
-        det = ''
+        self.det1 = ''
         with try_fit(it) as f:
-            det = f(specific_symbol('<'))
-        if not det:
-            det = fit(it, specific_symbol('"'))
+            self.det1 = f(specific_symbol('<'))
+        if not self.det1:
+            self.det1 = fit(it, specific_symbol('"'))
         suppress_spaces(it)
-        value = fit(it, CWord)
-        det2 = fit(it, CSymbol)
-        return cls(name, value, det, det2)
+        self.value = fit(it, CWord)
+        self.det2 = fit(it, CSymbol)
 
     def refactor(self, **kwargs):
         return f'#{self.name.refactor(**kwargs)} {self.det1.refactor(**kwargs)}{self.value.refactor(**kwargs)}{self.det2.refactor(**kwargs)}'
 
 
 class CColon2(CodePart):
-    @classmethod
-    def fit(cls, it):
-        return cls(fit_regex(it, '::'))
+
+    def __init__(self, it):
+        self.value = fit_regex(it, '::')
 
 
 class CWordsList(CodePart):
-    @classmethod
-    def fit(cls, it):
-        items = fit(it, [CWord], sep=CComma)
-        return cls(items)
+
+    def __init__(self, it):
+        self.items = fit(it, [CWord], sep=CComma)
 
     def refactor(self, **kwargs):
         return merge(', '.join(refactor_list(self.items)))
 
 
 class CTypeFull(CodePart):
-    def __init__(self, c_type, const, link, pointer):
-        self.type = c_type
-        self.const = const
-        self.link = link
-        self.pointer = pointer
-
-    @classmethod
-    def fit(cls, it):
-        const = have_item(it, specific_word('const'))
-        c_type = fit(it, CType)
-        const |= have_item(it, specific_word('const'))
-        link = have_item(it, specific_symbol('&'))
-        pointer = have_item(it, specific_symbol('*'))
-        return cls(c_type, const, link, pointer)
+    def __init__(self, it):
+        self.const = have_item(it, specific_word('const'))
+        self.type = fit(it, CType)
+        self.const |= have_item(it, specific_word('const'))
+        self.link = have_item(it, specific_symbol('&'))
+        self.pointer = have_item(it, specific_symbol('*'))
 
     def refactor(self, **kwargs):
         res = ''
         res += add_word(self.const, 'const ')
         res += self.type.refactor(**kwargs)
-        res += add_word(self.link, ' & ')
+        res += add_word(self.link, ' &')
         res += add_word(self.pointer, ' * ')
         return res
 
 
 class CType(CodePart):
-    def __init__(self, name, args, namespace):
-        assert isinstance(name, CWord)
-        assert isinstance(args, list)
-        self.name = name
-        self.args = args
-        self.namespace = namespace
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
+        self.args = None
         with try_fit(it) as f:
-            namespace = f(CWord)
+            self.namespace = f(CWord)
             f(CColon2)
-        if not f.success:
-            namespace = None
+        if f.fail:
+            self.namespace = None
 
         with try_fit(it) as f:
-            type_name = f(CWord)
+            self.name = f(CWord)
             f(specific_symbol('<'))
-            args = f([CType], sep=CComma)
+            self.args = f([CType], sep=CComma)
             f(specific_symbol('>'))
-            return cls(type_name, args, namespace)
 
-        return cls(fit(it, CWord), [], namespace)
+        if f.fail:
+            self.name = fit(it, CWord)
+
+        if self.name.value in key_words:
+            raise NotFitException
 
     def refactor(self, **kwargs):
         res = ''
@@ -354,15 +337,9 @@ class CType(CodePart):
 
 
 class CFuncArgument(CodePart):
-    def __init__(self, v_type, v_name):
-        self.type = v_type
-        self.name = v_name
-
-    @classmethod
-    def fit(cls, it):
-        var_type = fit(it, CTypeFull)
-        var_name = fit(it, CWord)
-        return cls(var_type, var_name)
+    def __init__(self, it):
+        self.type = fit(it, CTypeFull)
+        self.name = fit(it, CWord)
 
     def refactor(self, **kwargs):
         res = ''
@@ -372,47 +349,33 @@ class CFuncArgument(CodePart):
 
 
 class CFuncArguments(CodePart):
-    def __init__(self, args):
-        self.args = args
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_symbol('('))
-        args = []
+        self.args = []
         with try_fit(it) as f:
-            args = f([CFuncArgument], sep=CComma)
+            self.args = f([CFuncArgument], sep=CComma)
         fit(it, specific_symbol(')'))
-
-        return cls(args)
 
     def refactor(self, **kwargs):
         return f"({', '.join(refactor_list(self.args))})"
 
 
 class CFuncFullName(CodePart):
-    def __init__(self, name, virtual, friend, const):
-        self.name = name
-        self.virtual = virtual
-        self.friend = friend
-        self.const = const
+    def __init__(self, it):
+        self.virtual = have_item(it, specific_word('virtual'))
+        self.friend = have_item(it, specific_word('friend'))
 
-    @classmethod
-    def fit(cls, it):
-        virtual = have_item(it, specific_word('virtual'))
-        friend = have_item(it, specific_word('friend'))
-
-        name = None
+        self.name = None
         with try_fit(it) as f:
-            name = f(CMethodDestructor)
-        if not name:
-            with try_fit(it) as f: name = f(CMethodConstructor)
-        if not name:
-            with try_fit(it) as f: name = f(CFuncName)
-        if not name:
+            self.name = f(CMethodDestructor)
+        if not self.name:
+            with try_fit(it) as f: self.name = f(CMethodConstructor)
+        if not self.name:
+            with try_fit(it) as f: self.name = f(CFuncName)
+        if not self.name:
             raise NotFitException
 
-        const = have_item(it, specific_word('const'))
-        return cls(name, virtual, friend, const)
+        self.const = have_item(it, specific_word('const'))
 
     def refactor(self, **kwargs):
         res = ''
@@ -427,20 +390,14 @@ class CFuncFullName(CodePart):
 
 
 class CFuncNameString(CodePart):
-    def __init__(self, word, operation):
-        self.word = word
-        self.operation = operation
-
-    @classmethod
-    def fit(cls, it):
-        operation = None
-        word = None
+    def __init__(self, it):
+        self.operation = None
+        self.word = None
         with try_fit(it) as f:
             f(specific_word('operator'))
-            operation = f(r'[^(]+')
+            self.operation = f(r'[^(]+')
         if not f.success:
-            word = fit(it, CWord)
-        return cls(word, operation)
+            self.word = fit(it, CWord)
 
     def refactor(self, **kwargs):
         if self.word:
@@ -449,27 +406,17 @@ class CFuncNameString(CodePart):
 
 
 class CFuncName(CodePart):
-    def __init__(self, c_type, c_class, c_name, c_args):
-        self.c_type = c_type
-        self.c_class = c_class
-        self.c_name = c_name
-        self.c_args = c_args
-
-    @classmethod
-    def fit(cls, it):
-
-        c_type = fit(it, CTypeFull)
+    def __init__(self, it):
+        self.c_type = fit(it, CTypeFull)
         with try_fit(it) as f:
-            c_class = f(CWord)
+            self.c_class = f(CWord)
             f(CColon2)
 
         if not f.success:
-            c_class = None
+            self.c_class = None
 
-        c_name = fit(it, CFuncNameString)
-        c_args = fit(it, CFuncArguments)
-
-        return cls(c_type, c_class, c_name, c_args)
+        self.c_name = fit(it, CFuncNameString)
+        self.c_args = fit(it, CFuncArguments)
 
     def refactor(self, **kwargs):
         if self.c_class:
@@ -479,81 +426,72 @@ class CFuncName(CodePart):
 
 
 class CFuncDeclaration(CodePart):
-    def __init__(self, func):
-        self.func = func
+    def __init__(self, it):
+        self.func = fit(it, CFuncFullName)
+        self.equal_zero = False
+        self.default = False
+        with try_fit(it) as f:
+            f(specific_symbol('='))
 
-    @classmethod
-    def fit(cls, it):
-        func = fit(it, CFuncFullName)
+        if f.success:
+            self.equal_zero = have_item(it, specific_symbol('0'))
+            if not self.equal_zero:
+                self.default = True
+                fit(it, specific_word('default'))
+
         fit(it, CSemicolon)
-        return cls(func)
 
     def refactor(self, **kwargs):
-        return f'{self.func.refactor(**kwargs)};'
+        res = self.func.refactor(**kwargs)
+        if self.equal_zero:
+            res += ' = 0'
+        elif self.default:
+            res += ' = default'
+        res += ';'
+        return res
 
 
 class CBody(CodePart):
-    def __init__(self, expressions):
-        self.expressions = expressions
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_symbol('{'))
-        expressions = []
+        self.expressions = []
         with try_fit(it) as f:
-            expressions = f([CCommand])
+            self.expressions = f([CCommand])
         fit(it, specific_symbol('}'))
-        return cls(expressions)
 
     def refactor(self, indent=0, **kwargs):
-        content_indent = indent + RefSetting.indent
-        prefix = '\n' + ' ' * content_indent
-        bracket_indent = ' ' * indent
-        return '{' + \
-               ''.join(refactor_list(self.expressions, prefix=prefix, indent=content_indent)) + \
-               '\n' + bracket_indent + '}'
+        return '{\n' + \
+               refactor_list(self.expressions, join='\n',
+                             indent=indent + RefSetting.indent, **kwargs) + '\n' + \
+               str_indent(indent) + '}'
 
 
 class CBodyOrInstruction(CodePart):
-    def __init__(self, body, exp):
-        self.body = body
-        self.exp = exp
-
-    @classmethod
-    def fit(cls, it):
-        body = None
+    def __init__(self, it):
+        self.body = None
         with try_fit(it) as f:
-            body = f(CBody)
+            self.body = f(CBody)
 
-        exp = None
-        if not f.success:
-            exp = fit(it, CCommand)
+        self.exp = None
+        if f.fail:
+            self.exp = fit(it, CCommand)
 
-        return cls(body, exp)
-
-    def refactor(self, **kwargs):
+    def refactor(self, indent=0, **kwargs):
         if self.body:
-            return self.body.refactor(**kwargs)
+            return self.body.refactor(**kwargs, indent=indent)
 
-        return self.exp.refactor(**kwargs)
+        return self.exp.refactor(indent=indent + RefSetting.indent, **kwargs)
 
 
 class CConstructionIfElse(CodePart):
-    def __init__(self, exp, body, else_body):
-        self.exp = exp
-        self.body = body
-        self.else_body = else_body
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_word('if'))
-        exp = fit(it, CExpressionInBrackets)
-        body = fit(it, CBodyOrInstruction)
-        else_body = None
+        self.exp = fit(it, CExpressionInBrackets)
+        self.body = fit(it, CBodyOrInstruction)
+        self.else_body = None
         with try_fit(it) as f:
             f(specific_word('else'))
-            else_body = f(CBodyOrInstruction)
-        return cls(exp, body, else_body)
+            self.else_body = f(CBodyOrInstruction)
 
     def refactor(self, **kwargs):
         res = f'if {self.exp.refactor(**kwargs)} {self.body.refactor(**kwargs)}'
@@ -563,146 +501,209 @@ class CConstructionIfElse(CodePart):
 
 
 class CExpressionUntilBracket(CodePart):
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         s = fit_regex(it, r'[^)]+')
         while s.count('(') != s.count(')'):
             s += ')'
             it.shift(1)
             s += fit_regex(it, r'[^)]*')
 
-        return cls(s)
+        self.value = s
 
 
 class CExpressionInBrackets(CodePart):
-    def __init__(self, exp):
-        self.exp = exp
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_symbol('('))
-        exp = CEmpty()
+        self.exp = CEmpty(it)
         with try_fit(it) as f:
-            exp = f(CExpressionUntilBracket)
+            self.exp = f(CExpressionUntilBracket)
 
         fit(it, specific_symbol(')'))
-        return cls(exp)
 
     def refactor(self, **kwargs):
         return f'( {self.exp.refactor(**kwargs)} )'
 
 
 class CFullExpression(CodePart):
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         with try_fit(it) as f:
             f(specific_symbol('}'))
         if f.success:
             raise NotFitException
-        return cls(fit(it, r'[^;]*;'))
+
+        self.value = fit(it, r'[^;]*;')
 
 
 class CCommand(CodePart):
-    @classmethod
-    def fit(cls, it):
-        with try_fit(it) as f: return cls(f(CConstructionIfElse))
-        with try_fit(it) as f: return cls(f(CConstructionFor))
-        with try_fit(it) as f: return cls(f(CFullExpression))
-        raise NotFitException
+    def __init__(self, it):
+        with try_fit(it) as f:
+            self.value = f(CConstructionIfElse)
+        if f.fail:
+            with try_fit(it) as f:
+                self.value = f(CConstructionFor)
+        if f.fail:
+            with try_fit(it) as f:
+                self.value = f(CFullExpression)
+        if f.fail:
+            raise NotFitException
+
+    def refactor(self, indent=0, **kwargs):
+        return str_indent(indent) + self.value.refactor()
+
+
+class CFuncDeclarationAssignment(CodePart):
+    def __init__(self, it):
+        self.name = fit(it, CWord)
+        self.exp = fit(it, CExpressionInBrackets)
+
+    def refactor(self, **kwargs):
+        return f'{self.name}{self.exp}'
 
 
 class CFuncImplementation(CodePart):
-    def __init__(self, name, body):
-        self.name = name
-        self.body = body
-
-    @classmethod
-    def fit(cls, it):
-        name = fit(it, CFuncFullName)
-        body = fit(it, CBody)
-        return cls(name, body)
+    def __init__(self, it):
+        self.name = fit(it, CFuncFullName)
+        self.assignments = []
+        with try_fit(it) as f:
+            f(specific_symbol(':'))
+            self.assignments = f([CFuncDeclarationAssignment], sep=CComma)
+        self.body = fit(it, CBody)
 
     def refactor(self, **kwargs):
-        return f'{self.name.refactor(**kwargs)} {self.body.refactor(**kwargs)}'
+        res = self.name.refactor(**kwargs)
+        if self.assignments:
+            res += ': ' + refactor_list(self.assignments, join=', ')
+        res += ' ' + self.body.refactor(**kwargs)
+        return res
 
 
 class CMethodDestructor(CodePart):
-    @classmethod
-    def fit(cls, it):
-        return cls(fit(it, specific_symbol('~')), fit(it, CMethodConstructor))
+    def __init__(self, it):
+        self.value = fit(it, specific_symbol('~')), fit(it, CMethodConstructor)
 
 
 class CEmpty(CodePart):
-    @classmethod
-    def fit(cls, it):
-        raise NotFitException
-
-    def refactor(self, **kwargs):
-        return ''
+    def __init__(self, it):
+        self.value = ''
 
 
 class CMethodConstructor(CodePart):
-    def __init__(self, name, args):
-        self.name = name
-        self.args = args
-
-    @classmethod
-    def fit(cls, it):
-        name = fit(it, CWord)
-        args = fit(it, CFuncArguments)
-        return cls(name, args)
+    def __init__(self, it):
+        self.name = fit(it, CWord)
+        self.args = fit(it, CFuncArguments)
 
     def refactor(self, **kwargs):
         return f'{self.name.refactor(**kwargs)} {self.args.refactor(**kwargs)}'
 
 
 class CConstructionFor(CodePart):
-    def __init__(self, e1, e2, e3, body):
-        self.e1 = e1
-        self.e2 = e2
-        self.e3 = e3
-        self.body = body
-
-    @classmethod
-    def fit(cls, it):
+    def __init__(self, it):
         fit(it, specific_word('for'))
         fit(it, specific_symbol('('))
-        e1 = fit(it, CFullExpression)
-        e2 = fit(it, CFullExpression)
-        e3 = CEmpty()
+        self.e1 = fit(it, CFullExpression)
+        self.e2 = fit(it, CFullExpression)
+        self.e3 = CEmpty(it)
         with try_fit(it) as f:
-            e3 = f(CExpressionUntilBracket)
+            self.e3 = f(CExpressionUntilBracket)
 
         fit(it, specific_symbol(')'))
-        body = fit(it, CBodyOrInstruction)
-        return cls(e1, e2, e3, body)
+        self.body = fit(it, CBodyOrInstruction)
 
     def refactor(self, **kwargs):
         return f'for ({self.e1.refactor()} {self.e2.refactor()} {self.e3.refactor()}) {self.body.refactor(**kwargs)}'
 
 
-class CFunc(CodePart):
-    @classmethod
-    def fit(cls, it):
-        with try_fit(it) as f: return f(CFuncDeclaration)
-        return f(CFuncImplementation)
+class CFunction(CodePart):
+    def __init__(self, it):
+        self.value = fit_choice(it, CFuncDeclaration, CFuncImplementation)
 
 
-# class CClass(CodePart):
-#     @classmethod
-#     def fit(cls, it):
-#         fit(it, specific_word('class'))
-#         fit(it, specific_symbol('{'))
-#         fit(it, [CFunc])
-#         fit(it, specific_symbol('}'))
+class CVariableInit(CodePart):
+    def __init__(self, it):
+        self.type = fit(it, CTypeFull)
+        self.name = fit(it, CFullExpression)
+
+    def refactor(self, **kwargs):
+        return f'{self.type} {self.name}'
+
+
+class CFuncOrVarInit(CodePart):
+    def __init__(self, it):
+        self.value = fit_choice(it, CFunction, CVariableInit)
+
+    def refactor(self, indent=0, **kwargs):
+        return str_indent(indent) + self.value.refactor(**kwargs, indent=indent)
+
+
+class CClassAttributes(CodePart):
+    def __init__(self, it):
+        self.value = fit(it, [CFuncOrVarInit])
+
+
+def generate_class_section(section_type):
+    assert section_type == 'public' or section_type == 'private'
+
+    class CClassParticularSection(CodePart):
+        def __init__(self, it):
+            self.section_type = section_type
+            fit(it, specific_word(section_type))
+            fit(it, specific_symbol(':'))
+            self.attrs = CEmpty(it)
+            with try_fit(it) as f:
+                self.attrs = f(CClassAttributes)
+
+        def refactor(self, **kwargs):
+            return f'{section_type}:\n{self.attrs.refactor(**kwargs)}'
+
+    return CClassParticularSection
+
+
+class CClassSection(CodePart):
+    def __init__(self, it):
+        self.value = fit_choice(it, generate_class_section('public'), generate_class_section('private'))
+
+
+class CClass(CodePart):
+    def __init__(self, it):
+        fit(it, specific_word('class'))
+        self.name = fit(it, CWord)
+        fit(it, specific_symbol('{'))
+        self.private_sections = []
+        self.public_sections = []
+        self.sections = []
+        with try_fit(it) as f:
+            self.sections += f([CClassSection])
+        with try_fit(it) as f:
+            self.private_sections.append(f(CClassAttributes))
+        with try_fit(it) as f:
+            self.sections += f([CClassSection])
+
+        fit(it, specific_symbol('}'))
+        fit(it, CSemicolon)
+
+    def refactor(self, **kwargs):
+        private_sections = self.private_sections + list(
+            filter(lambda x: x.value.section_type == 'private', self.sections))
+        public_sections = self.public_sections + list(
+            filter(lambda x: x.value.section_type == 'public', self.sections))
+
+        public_attrs = sum(map(lambda x: x.value.attrs.value, public_sections), [])
+        private_attrs = sum(map(lambda x: x.value.attrs.value, private_sections), [])
+        shuffle(public_attrs)
+        shuffle(private_attrs)
+        res = f'class {self.name}' + ' {\n'
+        res += 'private:\n' + refactor_list(private_attrs, join='\n', indent=RefSetting.indent)
+        res += '\n\npublic:\n' + refactor_list(public_attrs, join='\n\n', indent=RefSetting.indent)
+        res += '\n};'
+        return res
 
 
 c_elements = [
     CSpaces,
     CInclude,
-    CFuncDeclaration,
-    CFuncImplementation,
-    CCommand,
+    CClass,
+    CFunction,
+    CVariableInit,
     CWord,
     CSymbol
 ]
@@ -717,7 +718,7 @@ if __name__ == '__main__':
                 code_elements.append(c_part)
                 break
 
-    pprint(code_elements)
+    pprint(list(filter(lambda x: not isinstance(x, CSpaces), code_elements)))
     refactored_code = ''.join(map(lambda x: x.refactor(), code_elements))
     refactored_code_name = f'[{file_name.split(".")[0]}]refactored.{file_name.split(".")[-1]}'
     with open(refactored_code_name, 'w') as file:
