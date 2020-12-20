@@ -1,231 +1,9 @@
-import re
-from functools import reduce
-from random import randint, shuffle
-from contextlib import suppress, contextmanager
-from pprint import pprint
-from collections.abc import Iterable
-
-
-file_name = 'code.cpp'
-
-with open('code.cpp', 'r') as file:
-    code = file.read()
-
-
-def rand_chance(how_many, from_amount):
-    return randint(1, from_amount) < how_many
-
-
-def throw_coin():
-    return rand_chance(1, 2)
-
-
-key_words = [
-    'class', 'for', 'if', 'else', 'public', 'private', 'while', 'do', 'struct'
-]
-
-
-class RefSetting:
-    indent = 4
-
-
-class StrIterator:
-    def __init__(self, text, index):
-        self.text = text
-        self.index = index
-
-    def shift(self, value):
-        self.index += value
-
-    def copy(self):
-        return StrIterator(self.text, self.index)
-
-    def fill_from(self, other):
-        self.index = other.index
-
-    @property
-    def string(self):
-        if self.index >= len(self.text):
-            print('OUT OF RANGE')
-            raise NotFitException
-        return self.text[self.index:]
-
-    def is_end(self):
-        return self.index >= len(self.text)
-
-
-class NotFitException(Exception):
-    pass
-
-
-def merge(*items, **kwargs):
-    res = []
-    prefix = ''
-    for item in items:
-        if isinstance(item, str):
-            res.append(prefix + item)
-        elif isinstance(item, CodePart):
-            res.append(item.refactor(**kwargs))
-        elif isinstance(item, Iterable):
-            res.append(merge(*item, **kwargs))
-        else:
-            raise TypeError(item)
-
-    return ''.join(res)
-
-
-def refactor_list(items, prefix='', join=None, **kwargs):
-    def adjust_value(value):
-        return merge(value, **kwargs)
-
-    res = list(
-        map(
-            lambda x: adjust_value(x.refactor(**kwargs)) if isinstance(x, CodePart) else adjust_value(x), items
-        )
-    )
-    if join:
-        res = join.join(res)
-    return res
-
-
-def add_word(need_add, word, prefix=False, postfix=False):
-    if not need_add:
-        return ''
-
-    return word
-
-
-def str_indent(indent):
-    return ' ' * indent
-
-
-def suppress_spaces(it):
-    with suppress(NotFitException):
-        fit(it, CSpaces, pass_spaces=False)
-
-
-def fit_regex(it, regex):
-    match = re.match(regex, it.string)
-    if not match:
-        raise NotFitException
-    value = match.group(0)
-    assert isinstance(value, str)
-    it.shift(len(value))
-    return value
-
-
-def fit(it, template, block_it=False, allow_spaces=True, sep=None, pass_spaces=True):
-    if block_it:
-        it = it.copy()
-    if pass_spaces:
-        suppress_spaces(it)
-
-    if type(template) is type and issubclass(template, CodePart):
-        return template(it)
-
-    elif isinstance(template, str):
-        return fit_regex(it, template)
-
-    elif isinstance(template, list):
-        temp = template[0]
-        items = [fit(it, temp)]
-        while True:
-            next_item = None
-            with try_fit(it) as f:
-                if allow_spaces:
-                    suppress_spaces(it)
-
-                if sep:
-                    f(sep)
-                    if allow_spaces:
-                        suppress_spaces(it)
-                next_item = [f(temp)]
-
-            if not next_item:
-                break
-            items += next_item
-
-        return items
-    else:
-        raise TypeError(template)
-
-
-def have_item(it, item):
-    with try_fit(it) as f:
-        f(item)
-    return f.success
-
-
-def fit_choice(it, *templates):
-    for temp in templates:
-        with try_fit(it) as f:
-            return f(temp)
-
-    raise NotFitException
-
-
-@contextmanager
-def try_fit(it):
-    it_copy = it.copy()
-
-    def safe_fit(*args, **kwargs):
-        return fit(it_copy, *args, **kwargs)
-
-    safe_fit.success = True
-    safe_fit.fail = False
-
-    try:
-        yield safe_fit
-    except NotFitException:
-        safe_fit.success = False
-        safe_fit.fail = True
-        pass
-    else:
-        it.fill_from(it_copy)
-
-
-def specific_symbol(symbol):
-    class SpecificSymbol(CSymbol):
-        def __init__(self, it):
-            super().__init__(it)
-            if self.value != symbol:
-                raise NotFitException
-
-    return SpecificSymbol
-
-
-def specific_word(word):
-    class SpecificWord(CWord):
-        def __init__(self, it):
-            super().__init__(it)
-            if self.value != word:
-                raise NotFitException
-
-    return SpecificWord
-
-
-# @logger.logit
-class CodePart:
-    @classmethod
-    def parse(cls, it):
-        try:
-            it_copy = it.copy()
-            res = cls(it_copy)
-            it.fill_from(it_copy)
-            return res
-        except NotFitException:
-            return None
-
-    def refactor(self, **kwargs):
-        return merge(self.value, **kwargs)
-
-    def __repr__(self):
-        rep = self.refactor().replace('    ', ' ')
-        n = '\n'
-        return f'{self.__class__.__name__}({rep.replace(n, " ")[:100]})'
-
-    def __str__(self):
-        return self.refactor()
+from random import shuffle
+
+from parser_utils import *
+from config import obfuscator_settings, key_words
+from constants import *
+from utils import str_indent
 
 
 class CSpaces(CodePart):
@@ -270,7 +48,8 @@ class CInclude(CodePart):
         self.det2 = fit(it, CSymbol)
 
     def refactor(self, **kwargs):
-        return f'#{self.name.refactor(**kwargs)} {self.det1.refactor(**kwargs)}{self.value.refactor(**kwargs)}{self.det2.refactor(**kwargs)}'
+        return f'#{self.name.refactor(**kwargs)} {self.det1.refactor(**kwargs)}' + \
+               f'{self.value.refactor(**kwargs)}{self.det2.refactor(**kwargs)}'
 
 
 class CColon2(CodePart):
@@ -462,7 +241,7 @@ class CBody(CodePart):
     def refactor(self, indent=0, **kwargs):
         return '{\n' + \
                refactor_list(self.expressions, join='\n',
-                             indent=indent + RefSetting.indent, **kwargs) + '\n' + \
+                             indent=indent + obfuscator_settings[INDENT], **kwargs) + '\n' + \
                str_indent(indent) + '}'
 
 
@@ -480,7 +259,7 @@ class CBodyOrInstruction(CodePart):
         if self.body:
             return self.body.refactor(**kwargs, indent=indent)
 
-        return self.exp.refactor(indent=indent + RefSetting.indent, **kwargs)
+        return self.exp.refactor(indent=indent + obfuscator_settings[INDENT], **kwargs)
 
 
 class CConstructionIfElse(CodePart):
@@ -640,29 +419,6 @@ class CClassAttributes(CodePart):
         self.value = fit(it, [CFuncOrVarInit])
 
 
-def generate_class_section(section_type):
-    assert section_type == 'public' or section_type == 'private'
-
-    class CClassParticularSection(CodePart):
-        def __init__(self, it):
-            self.section_type = section_type
-            fit(it, specific_word(section_type))
-            fit(it, specific_symbol(':'))
-            self.attrs = CEmpty(it)
-            with try_fit(it) as f:
-                self.attrs = f(CClassAttributes)
-
-        def refactor(self, **kwargs):
-            return f'{section_type}:\n{self.attrs.refactor(**kwargs)}'
-
-    return CClassParticularSection
-
-
-class CClassSection(CodePart):
-    def __init__(self, it):
-        self.value = fit_choice(it, generate_class_section('public'), generate_class_section('private'))
-
-
 class CClass(CodePart):
     def __init__(self, it):
         fit(it, specific_word('class'))
@@ -692,34 +448,51 @@ class CClass(CodePart):
         shuffle(public_attrs)
         shuffle(private_attrs)
         res = f'class {self.name}' + ' {\n'
-        res += 'private:\n' + refactor_list(private_attrs, join='\n', indent=RefSetting.indent)
-        res += '\n\npublic:\n' + refactor_list(public_attrs, join='\n\n', indent=RefSetting.indent)
+        res += 'private:\n' + refactor_list(private_attrs, join='\n', indent=obfuscator_settings[INDENT])
+        res += '\n\npublic:\n' + refactor_list(public_attrs, join='\n\n', indent=obfuscator_settings[INDENT])
         res += '\n};'
         return res
 
 
-c_elements = [
-    CSpaces,
-    CInclude,
-    CClass,
-    CFunction,
-    CVariableInit,
-    CWord,
-    CSymbol
-]
+class CClassSection(CodePart):
 
-if __name__ == '__main__':
-    code_elements = []
-    iterator = StrIterator(code, 0)
-    while not iterator.is_end():
-        for CPart in c_elements:
-            c_part = CPart.parse(iterator)
-            if c_part:
-                code_elements.append(c_part)
-                break
+    @staticmethod
+    def generate_class_section(section_type):
+        assert section_type == 'public' or section_type == 'private'
 
-    pprint(list(filter(lambda x: not isinstance(x, CSpaces), code_elements)))
-    refactored_code = ''.join(map(lambda x: x.refactor(), code_elements))
-    refactored_code_name = f'[{file_name.split(".")[0]}]refactored.{file_name.split(".")[-1]}'
-    with open(refactored_code_name, 'w') as file:
-        file.write(refactored_code)
+        class CClassParticularSection(CodePart):
+            def __init__(self, it):
+                self.section_type = section_type
+                fit(it, specific_word(section_type))
+                fit(it, specific_symbol(':'))
+                self.attrs = CEmpty(it)
+                with try_fit(it) as f:
+                    self.attrs = f(CClassAttributes)
+
+            def refactor(self, **kwargs):
+                return f'{section_type}:\n{self.attrs.refactor(**kwargs)}'
+
+        return CClassParticularSection
+
+    def __init__(self, it):
+        self.value = fit_choice(it, self.generate_class_section('public'), self.generate_class_section('private'))
+
+
+def specific_symbol(symbol):
+    class SpecificSymbol(CSymbol):
+        def __init__(self, it):
+            super().__init__(it)
+            if self.value != symbol:
+                raise NotFitException
+
+    return SpecificSymbol
+
+
+def specific_word(word):
+    class SpecificWord(CWord):
+        def __init__(self, it):
+            super().__init__(it)
+            if self.value != word:
+                raise NotFitException
+
+    return SpecificWord
