@@ -1,6 +1,5 @@
 venv/
 *pyc
-*.cpp
 *.txt
 *.swp
 .idea/
